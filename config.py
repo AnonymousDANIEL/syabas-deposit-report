@@ -57,6 +57,14 @@ class Config:
     dry_run: bool
     job_timeout_seconds: int
     force_run: bool
+    prelogin_enabled: bool
+    prelogin_minute: int
+    run_forever: bool
+    session_guard_enabled: bool
+    session_guard_seconds: int
+    auth_relogin_retries: int
+    report_grace_seconds: int
+    report_retry_seconds: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -92,4 +100,12 @@ class Config:
             dry_run=_bool("DRY_RUN", False),
             job_timeout_seconds=_int("JOB_TIMEOUT_SECONDS", 240),
             force_run=_bool("FORCE_RUN", False),
+            prelogin_enabled=_bool("PRELOGIN_ENABLED", False),
+            prelogin_minute=_int("PRELOGIN_MINUTE", 55),
+            run_forever=_bool("RUN_FOREVER", True),
+            session_guard_enabled=_bool("SESSION_GUARD_ENABLED", True),
+            session_guard_seconds=max(5, _int("SESSION_GUARD_SECONDS", 15)),
+            auth_relogin_retries=max(1, _int("AUTH_RELOGIN_RETRIES", 5)),
+            report_grace_seconds=max(0, _int("REPORT_GRACE_SECONDS", 60)),
+            report_retry_seconds=max(5, _int("REPORT_RETRY_SECONDS", 30)),
         )

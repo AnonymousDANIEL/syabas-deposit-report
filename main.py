@@ -3,18 +3,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
-import signal
 import sys
 import time
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from config import Config
 from report import HourBucket, ReportSnapshot, bucket_windows, build_message, closed_report_window
 from state import StateStore
-from syabas99 import SyabasClient, SyabasError, Totals
-from telegram_bot import TelegramBot, TelegramError
+from syabas99 import SyabasClient, Totals
+from telegram_bot import TelegramBot
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,15 +25,12 @@ log = logging.getLogger("syabas-report")
 class ValidationError(RuntimeError):
     pass
 
+
 def _slot_key(now: datetime, cfg: Config) -> tuple[str, str]:
     tz = ZoneInfo(cfg.report_timezone)
     report_date, closed_end = closed_report_window(now, tz)
     label = f"{((closed_end.hour + 1) % 24):02d}00"
     return f"{report_date.isoformat()}:{label}", label
-
-
-def _timeout_handler(signum, frame):
-    raise TimeoutError("Job exceeded JOB_TIMEOUT_SECONDS and was stopped so the next watchdog run can retry")
 
 
 def _same_amount(a: Decimal, b: Decimal) -> bool:
@@ -66,7 +62,7 @@ def collect_snapshot(cfg: Config, client: SyabasClient, now: datetime) -> Report
         cumulative = client.transaction_totals(day_start, closed_end)
         cumulative_ok = summed.count == cumulative.count and _same_amount(summed.amount, cumulative.amount)
 
-        # The daily report is only a clean apples-to-apples check once the whole day has closed.
+        # Full daily report validation only once 0000 closes the day.
         is_final_day = len(windows) == 24
         daily_ok: bool | None = None
         if is_final_day:
@@ -96,30 +92,39 @@ def collect_snapshot(cfg: Config, client: SyabasClient, now: datetime) -> Report
             f"daily_ok={daily_ok}"
         )
         if attempt < cfg.validation_retries:
-            log.warning("%s; retrying full snapshot in %ss", last_error, cfg.validation_retry_delay_seconds)
+            log.warning(
+                "%s; retrying full snapshot in %ss",
+                last_error,
+                cfg.validation_retry_delay_seconds,
+            )
             time.sleep(cfg.validation_retry_delay_seconds)
-            client.login()  # clean token/session between validation attempts
+            # Fresh login between complete validation attempts. If another person has
+            # logged in, this immediately reclaims the account before retrying.
+            client.force_login()
 
     raise last_error or ValidationError("Unable to validate report")
 
 
-def run_once(cfg: Config) -> str:
+def run_once(cfg: Config, client: SyabasClient | None = None) -> str:
     state = StateStore(cfg.state_path)
     bot = TelegramBot(cfg, state)
-    client = SyabasClient(cfg)
+    client = client or SyabasClient(cfg)
 
     now = datetime.now(ZoneInfo(cfg.report_timezone))
     slot_key, slot_label = _slot_key(now, cfg)
-    log.info("Watchdog tick: Malaysia=%s target_slot=%s", now.strftime("%Y-%m-%d %H:%M:%S"), slot_label)
+    log.info(
+        "Report tick: Malaysia=%s target_slot=%s",
+        now.strftime("%Y-%m-%d %H:%M:%S"),
+        slot_label,
+    )
 
-    # Railway runs this job every 5 minutes. Only the first successful tick for a new
-    # report slot does the expensive API work. If a run fails, the slot is NOT marked
-    # successful, so the next 5-minute tick retries automatically.
     if not cfg.force_run and not cfg.dry_run and state.get_last_successful_slot() == slot_key:
         log.info("Slot %s already updated successfully; nothing to do", slot_key)
         return "SKIPPED_ALREADY_SUCCESSFUL"
 
-    client.login()
+    # Fresh login before every report cycle. If a human login was the latest session,
+    # the report worker immediately takes the session back here.
+    client.login(reason="takeover")
     snapshot = collect_snapshot(cfg, client, now)
     text = build_message(snapshot, cfg)
 
@@ -129,8 +134,107 @@ def run_once(cfg: Config) -> str:
         bot.upsert_daily_report(snapshot.report_date.isoformat(), text)
         state.set_last_successful_slot(slot_key)
         bot.clear_error()
-        log.info("RUN SUCCESS slot=%s total=%s amount=%s", slot_key, snapshot.totals.count, snapshot.totals.amount)
+        log.info(
+            "RUN SUCCESS slot=%s total=%s amount=%s",
+            slot_key,
+            snapshot.totals.count,
+            snapshot.totals.amount,
+        )
     return text
+
+
+def _send_error_once(cfg: Config, exc: Exception) -> None:
+    state = StateStore(cfg.state_path)
+    bot = TelegramBot(cfg, state)
+    fingerprint = hashlib.sha256(f"{type(exc).__name__}:{exc}".encode()).hexdigest()[:16]
+    try:
+        bot.alert_once(
+            fingerprint,
+            "Syabas99 Deposit Report ERROR\n\n"
+            f"{type(exc).__name__}: {str(exc)[:700]}",
+        )
+    except Exception:
+        log.exception("Failed to send Telegram error alert")
+
+
+def _seconds_into_hour(local_now: datetime) -> int:
+    return local_now.minute * 60 + local_now.second
+
+
+def run_forever(cfg: Config) -> None:
+    """
+    Always-on Railway worker.
+
+    Why this is more stable than cron for this use case:
+    - The process stays alive instead of waiting for the next 5-minute cron run.
+    - Every SESSION_GUARD_SECONDS it probes the current authenticated session.
+    - If another login invalidates the bot token, the same probe immediately
+      force-logins and retries; there is no need to Restart Railway.
+    - Every hour, after REPORT_GRACE_SECONDS, it updates the report once.
+    - A failed hourly update retries every REPORT_RETRY_SECONDS until it succeeds.
+    """
+    tz = ZoneInfo(cfg.report_timezone)
+    state = StateStore(cfg.state_path)
+    client = SyabasClient(cfg)
+
+    log.info(
+        "DAEMON START timezone=%s guard=%ss grace=%ss retry=%ss",
+        cfg.report_timezone,
+        cfg.session_guard_seconds,
+        cfg.report_grace_seconds,
+        cfg.report_retry_seconds,
+    )
+
+    # Claim the account immediately at startup.
+    try:
+        client.login(reason="takeover")
+    except Exception as exc:
+        log.exception("Initial force-login failed; daemon will keep retrying")
+        _send_error_once(cfg, exc)
+
+    next_guard_at = 0.0
+    next_report_retry_at = 0.0
+
+    while True:
+        loop_now = time.monotonic()
+        local_now = datetime.now(tz)
+
+        # Continuous session ownership guard. This is the part that detects a
+        # rotated/invalid token caused by another login and takes the session back.
+        if cfg.session_guard_enabled and loop_now >= next_guard_at:
+            try:
+                client.session_healthcheck()
+                log.info("SESSION GUARD OK")
+            except Exception as exc:
+                log.exception("SESSION GUARD failed; forcing login immediately")
+                try:
+                    client.force_login()
+                    client.session_healthcheck()
+                    log.warning("SESSION GUARD RECOVERED - account reclaimed immediately")
+                except Exception as reclaim_exc:
+                    log.exception("SESSION GUARD could not reclaim account yet")
+                    _send_error_once(cfg, reclaim_exc)
+            next_guard_at = time.monotonic() + cfg.session_guard_seconds
+
+        # Wait a short grace period after the top of the hour so Syabas99 can finish
+        # closing the previous hour. After that, retry continuously until success.
+        if _seconds_into_hour(local_now) >= cfg.report_grace_seconds:
+            slot_key, slot_label = _slot_key(local_now, cfg)
+            if state.get_last_successful_slot() != slot_key and loop_now >= next_report_retry_at:
+                try:
+                    log.info("HOURLY UPDATE DUE slot=%s - running now", slot_label)
+                    run_once(cfg, client)
+                    next_report_retry_at = 0.0
+                except Exception as exc:
+                    log.exception(
+                        "Hourly update failed; retrying in %ss without waiting for next hour",
+                        cfg.report_retry_seconds,
+                    )
+                    _send_error_once(cfg, exc)
+                    next_report_retry_at = time.monotonic() + cfg.report_retry_seconds
+
+        # Short sleep keeps takeover detection responsive without hammering CPU.
+        time.sleep(2)
 
 
 def print_chat_ids(cfg: Config) -> None:
@@ -156,17 +260,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Syabas99 hourly Telegram deposit report")
     parser.add_argument("--get-chat-id", action="store_true", help="Print chat IDs from Telegram getUpdates")
     parser.add_argument("--test-telegram", action="store_true", help="Send a small Telegram test message")
+    parser.add_argument("--once", action="store_true", help="Run one report cycle and exit")
     args = parser.parse_args()
 
     cfg = Config.from_env()
     state = StateStore(cfg.state_path)
     bot = TelegramBot(cfg, state)
-
-    # Hard-stop a stuck cron execution before the next 5-minute watchdog tick.
-    # Railway skips new cron runs while a previous execution is still Active.
-    if cfg.job_timeout_seconds > 0 and hasattr(signal, "SIGALRM"):
-        signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(cfg.job_timeout_seconds)
 
     try:
         if args.get_chat_id:
@@ -176,20 +275,18 @@ def main() -> int:
             msg_id = bot.send_message(cfg.telegram_chat_id, "Syabas99 Telegram Bot ✅ Connected", silent=False)
             print(f"Telegram OK, message_id={msg_id}")
             return 0
+        if args.once or not cfg.run_forever:
+            run_once(cfg)
+            return 0
 
-        run_once(cfg)
+        run_forever(cfg)
+        return 0
+    except KeyboardInterrupt:
+        log.info("Daemon stopped")
         return 0
     except Exception as exc:
-        log.exception("Report run failed")
-        fingerprint = hashlib.sha256(f"{type(exc).__name__}:{exc}".encode()).hexdigest()[:16]
-        try:
-            bot.alert_once(
-                fingerprint,
-                "Syabas99 Deposit Report ERROR\n\n"
-                f"{type(exc).__name__}: {str(exc)[:700]}",
-            )
-        except Exception:
-            log.exception("Failed to send Telegram error alert")
+        log.exception("Report process failed")
+        _send_error_once(cfg, exc)
         return 1
 
 

@@ -1,163 +1,150 @@
-# Syabas99 → Telegram Hourly Deposit Report
+# Syabas99 Telegram Deposit Report — Stable V4
 
-Production-oriented hourly report job for the Syabas99 admin API.
+This version is designed for the requirement: **if another login invalidates the bot session, reclaim the Syabas99 login immediately instead of waiting for the next cron run.**
 
-## What it does
+## What changed from V3
 
-- Logs in with the Syabas99 username/password on every run.
-- Never hard-codes or stores `accessId` / `accessToken`; a fresh token is obtained from `/users/login`.
-- Uses `/transactions/getAllTransactions` with `DEPOSIT + COMPLETED`.
-- **Does not paginate through all 300+ pages.** It uses the API's own `totalCount` and `totalAmount` for each completed hour and does not store transaction rows/customer data.
-- Re-queries every already-completed hour each run, so late-completed transactions are corrected automatically.
-- At `21:05`, for example, the latest closed bucket is `20:00:00–20:59:59`, displayed as `2100`.
-- At `00:05`, the previous day's last bucket `23:00:00–23:59:59` is displayed as `0000`, completing the 24-hour report.
-- Verifies the sum of all hourly buckets against a cumulative API query before Telegram is updated.
-- At day close it also cross-checks `/reports/transactions` Daily totals.
-- Creates one Telegram message per report date and edits the same message once per new hourly slot.
-- Railway runs a 5-minute watchdog; if the scheduled hourly update fails, the next tick retries automatically without duplicating successful updates.
-- A 240-second hard timeout prevents a stuck run from blocking future cron executions.
-- Stores only Telegram message IDs in `/data/syabas_state.json`; no customer data is stored.
+V3 used Railway Cron every 5 minutes. V4 is an **always-on Railway worker**.
 
-## Telegram output
+- No 5-minute pre-login.
+- No need to wait for the next cron tick.
+- A lightweight authenticated health check runs every `SESSION_GUARD_SECONDS` (default 15 seconds).
+- If the token/session is rejected after another login, the worker immediately calls `/users/login`, gets a new `accessId` + `token`, and retries the same request.
+- The same immediate re-login logic is active during hourly report calculations, so a token rotation in the middle of a report does not have to wait for another scheduler cycle.
+- Each hourly report runs after a short grace period (`REPORT_GRACE_SECONDS`, default 60 seconds) so the previous hour can finish settling.
+- If the report validation/API fails, it retries every `REPORT_RETRY_SECONDS` (default 30 seconds) until the hour is successfully updated.
 
-```text
-Syabas99 Deposit Report
+## Railway setup — IMPORTANT
 
-Date : 23/08/2026
-Target : 8,300
-Target Deposit : 100,000
+### 1. Remove the Cron Schedule
 
-TOTAL COUNT : 3,181
-TOTAL AMOUNT : RM 103,545.22
-
-0100 - ...
-0200 - ...
-...
-2100 - ...
-```
-
-`REPORT_LINE_STYLE=full` also shows cumulative totals on each line.
-
-## 1. Security first
-
-If a password/token was ever exposed in a screenshot/chat, change the Syabas99 password before deployment. Do not put the password or Telegram bot token in GitHub code.
-
-## 2. Create Telegram Bot
-
-1. Open Telegram and chat with **@BotFather**.
-2. Send `/newbot` and follow the prompts.
-3. Copy the Bot Token and keep it private.
-4. Add the bot to the target group/channel. For a channel, make the bot an admin with permission to post/edit messages.
-5. To get a chat ID, first send `/start` to the bot (or send a message in the group), then run:
-
-```bash
-python main.py --get-chat-id
-```
-
-Put the returned ID in `TELEGRAM_CHAT_ID`.
-
-## 3. Local test
-
-```bash
-cp .env.example .env
-# Edit .env with your OWN secrets
-pip install -r requirements.txt
-python main.py --test-telegram
-DRY_RUN=true python main.py
-```
-
-If login fails and the backend requires the browser's tracking code, set `SITE_TRACKING_CODE`. `SITE_PASSCODE_2FA` and `SITE_CAPTCHA_OUTPUT` are also supported, but CAPTCHA that changes every login cannot be safely automated and should cause the job to stop instead of bypassing it.
-
-## 4. Railway deployment (recommended)
-
-1. Put this folder in a private GitHub repository.
-2. Railway → **New Project** → **Deploy from GitHub Repo**.
-3. Add all `.env.example` values under Railway **Variables**. Do not upload `.env`.
-4. Add a Railway **Volume** to this service and mount it at:
-
-```text
-/data
-```
-
-This preserves the Telegram `message_id` so the same daily message can keep being edited after restarts.
-
-5. In Service → Settings → **Cron Schedule**, set the reliability watchdog:
+V4 must stay running continuously. In Railway **Settings**, remove/disable the Cron Schedule such as:
 
 ```cron
 */5 * * * *
 ```
 
-Railway cron uses UTC. Running every 5 minutes avoids relying on one exact minute. The code itself decides whether a new Malaysia hourly slot is due, updates it once, and exits. If a run fails, a later 5-minute tick retries the same slot.
+Do not use a cron schedule for V4.
 
-6. Start command is already the Dockerfile default:
+### 2. Keep the service running
 
-```text
+The included Dockerfile starts:
+
+```bash
 python main.py
 ```
 
-Each cron run finishes and exits. The computer does **not** need to remain on.
+`RUN_FOREVER=true` makes it remain active as a worker.
 
-## Why a 5-minute watchdog instead of one hourly tick?
+### 3. Keep the `/data` Volume
 
-Railway does not guarantee exact-to-the-minute cron execution, and it skips a new cron run if a previous run is still active. The watchdog runs every 5 minutes; successful slots are remembered so repeated ticks do nothing. Failed slots are retried on the next tick.
-
-Example:
-
-- first successful tick after 21:00 → includes through 20:59:59 → line `2100`
-- first successful tick after 22:00 → includes through 21:59:59 → line `2200`
-- first successful tick after 00:00 → includes previous day 23:00–23:59 → line `0000`
-
-## Changing Target values
-
-Change Railway Variables only:
+Mount Railway Volume at:
 
 ```text
-TARGET_COUNT=9000
-TARGET_DEPOSIT=120000
+/data
 ```
 
-No code change or rebuild is required for normal variable updates after Railway redeploys/restarts the cron service with the new environment.
+The state file stores the Telegram message ID and the last successful report slot. It does not need to store customer transaction rows.
 
-## Reliability behavior
-
-- 5-minute watchdog with idempotent per-slot success state.
-- 240-second hard job timeout so a stuck run cannot block future ticks.
-- HTTP retries with exponential backoff.
-- Fresh login every cron run.
-- Automatic re-login once if an authenticated API request is rejected.
-- Full hourly re-calculation every run (not incremental local addition).
-- Decimal money arithmetic.
-- Hourly-sum vs cumulative-total validation before Telegram update.
-- Daily API cross-check after all 24 hours close.
-- Existing Telegram message is never overwritten when validation fails.
-- Optional `TELEGRAM_ALERT_CHAT_ID` sends one alert per unique error until the error changes or a successful run clears it.
-
-## Important assumptions confirmed from the captured API
-
-Login module:
+## Required Variables
 
 ```text
-/users/login
+SITE_API_URL=https://jksyab99.u55y38.com/api/v1/index.php
+SITE_USERNAME=...
+SITE_PASSWORD=...
+SITE_MERCHANT_ID=10776
+SITE_TRACKING_CODE=
+
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+
+TARGET_COUNT=8300
+TARGET_DEPOSIT=100000
+REPORT_TIMEZONE=Asia/Kuala_Lumpur
+REPORT_LINE_STYLE=full
+STATE_PATH=/data/syabas_state.json
+
+RUN_FOREVER=true
+SESSION_GUARD_ENABLED=true
+SESSION_GUARD_SECONDS=15
+AUTH_RELOGIN_RETRIES=5
+REPORT_GRACE_SECONDS=60
+REPORT_RETRY_SECONDS=30
+
+PRELOGIN_ENABLED=false
 ```
 
-Hourly/cumulative source:
+`TARGET_DEPOSIT` must be `100000`, not `100,000`.
+
+## Runtime behavior
+
+Example around 22:00 Malaysia time:
 
 ```text
-/transactions/getAllTransactions
+21:59:45  session guard OK
+22:00:00  new 2200 slot exists
+22:01:00  report starts (default 60-second grace)
+           fresh force-login
+           fetch 0100..2200 data
+           validate hourly sum vs cumulative total
+           edit the same Telegram report message
 ```
 
-with:
+If a person logs in at 22:12 and the site invalidates the worker's token:
 
 ```text
-type=DEPOSIT
-status=COMPLETED
+22:12:xx  health check is rejected
+           SESSION LOST/ROTATED
+           force /users/login immediately
+           new accessId/token
+           retry health check
+           SESSION RECOVERED
 ```
 
-Daily verification source:
+With `SESSION_GUARD_SECONDS=15`, detection is normally within about 15 seconds. Lower values create more API traffic; 15 seconds is the recommended default.
+
+## Important limitation
+
+The worker can only detect another login if that login actually invalidates/rotates the worker's authenticated token. There is no separate known "someone logged in" event endpoint. If the backend permits multiple simultaneous tokens, there is nothing to recover because the bot session remains valid.
+
+If a human keeps repeatedly logging in with the same account and the site allows only one session, the human and bot can repeatedly replace each other's session. The most reliable production setup is a dedicated Syabas99 account for the report worker if the backend supports one.
+
+## Useful logs
+
+Normal:
 
 ```text
-/reports/transactions
-period=Daily
+DAEMON START ...
+SESSION GUARD OK
+HOURLY UPDATE DUE slot=2200 - running now
+SESSION TAKEOVER OK - Syabas99 force-login reclaimed the account
+RUN SUCCESS slot=2026-08-24:2200 ...
 ```
 
-If Syabas99 changes these private backend API contracts later, the code may require an update.
+If another login invalidates the token:
+
+```text
+SESSION LOST/ROTATED ... Force-login starts immediately.
+SESSION TAKEOVER OK ...
+SESSION RECOVERED immediately ...
+```
+
+## One-time commands
+
+Run once and exit:
+
+```bash
+python main.py --once
+```
+
+Test Telegram:
+
+```bash
+python main.py --test-telegram
+```
+
+Get Telegram chat IDs:
+
+```bash
+python main.py --get-chat-id
+```
