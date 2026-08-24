@@ -13,7 +13,9 @@ Production-oriented hourly report job for the Syabas99 admin API.
 - At `00:05`, the previous day's last bucket `23:00:00–23:59:59` is displayed as `0000`, completing the 24-hour report.
 - Verifies the sum of all hourly buckets against a cumulative API query before Telegram is updated.
 - At day close it also cross-checks `/reports/transactions` Daily totals.
-- Creates one Telegram message per report date and edits the same message every hour.
+- Creates one Telegram message per report date and edits the same message once per new hourly slot.
+- Railway runs a 5-minute watchdog; if the scheduled hourly update fails, the next tick retries automatically without duplicating successful updates.
+- A 240-second hard timeout prevents a stuck run from blocking future cron executions.
 - Stores only Telegram message IDs in `/data/syabas_state.json`; no customer data is stored.
 
 ## Telegram output
@@ -79,13 +81,13 @@ If login fails and the backend requires the browser's tracking code, set `SITE_T
 
 This preserves the Telegram `message_id` so the same daily message can keep being edited after restarts.
 
-5. In Service → Settings → **Cron Schedule**, set:
+5. In Service → Settings → **Cron Schedule**, set the reliability watchdog:
 
 ```cron
-5 * * * *
+*/5 * * * *
 ```
 
-Railway cron uses UTC, but `:05` is still `:05` in Malaysia; the program itself uses `Asia/Kuala_Lumpur` for report-day logic.
+Railway cron uses UTC. Running every 5 minutes avoids relying on one exact minute. The code itself decides whether a new Malaysia hourly slot is due, updates it once, and exits. If a run fails, a later 5-minute tick retries the same slot.
 
 6. Start command is already the Dockerfile default:
 
@@ -95,15 +97,15 @@ python main.py
 
 Each cron run finishes and exits. The computer does **not** need to remain on.
 
-## Why `:05` instead of exactly `:00`?
+## Why a 5-minute watchdog instead of one hourly tick?
 
-The job intentionally runs a few minutes after the hour. It reports only the hour that has fully closed, reducing race conditions while COMPLETED transactions are still settling.
+Railway does not guarantee exact-to-the-minute cron execution, and it skips a new cron run if a previous run is still active. The watchdog runs every 5 minutes; successful slots are remembered so repeated ticks do nothing. Failed slots are retried on the next tick.
 
 Example:
 
-- 21:05 run → includes through 20:59:59 → line `2100`
-- 22:05 run → includes through 21:59:59 → line `2200`
-- 00:05 next day → includes previous day 23:00–23:59 → line `0000`
+- first successful tick after 21:00 → includes through 20:59:59 → line `2100`
+- first successful tick after 22:00 → includes through 21:59:59 → line `2200`
+- first successful tick after 00:00 → includes previous day 23:00–23:59 → line `0000`
 
 ## Changing Target values
 
@@ -118,6 +120,8 @@ No code change or rebuild is required for normal variable updates after Railway 
 
 ## Reliability behavior
 
+- 5-minute watchdog with idempotent per-slot success state.
+- 240-second hard job timeout so a stuck run cannot block future ticks.
 - HTTP retries with exponential backoff.
 - Fresh login every cron run.
 - Automatic re-login once if an authenticated API request is rejected.

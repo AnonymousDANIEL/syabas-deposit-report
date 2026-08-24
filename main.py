@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import logging
+import signal
 import sys
 import time
 from datetime import datetime, time as dtime, timedelta
@@ -24,6 +25,16 @@ log = logging.getLogger("syabas-report")
 
 class ValidationError(RuntimeError):
     pass
+
+def _slot_key(now: datetime, cfg: Config) -> tuple[str, str]:
+    tz = ZoneInfo(cfg.report_timezone)
+    report_date, closed_end = closed_report_window(now, tz)
+    label = f"{((closed_end.hour + 1) % 24):02d}00"
+    return f"{report_date.isoformat()}:{label}", label
+
+
+def _timeout_handler(signum, frame):
+    raise TimeoutError("Job exceeded JOB_TIMEOUT_SECONDS and was stopped so the next watchdog run can retry")
 
 
 def _same_amount(a: Decimal, b: Decimal) -> bool:
@@ -98,6 +109,16 @@ def run_once(cfg: Config) -> str:
     client = SyabasClient(cfg)
 
     now = datetime.now(ZoneInfo(cfg.report_timezone))
+    slot_key, slot_label = _slot_key(now, cfg)
+    log.info("Watchdog tick: Malaysia=%s target_slot=%s", now.strftime("%Y-%m-%d %H:%M:%S"), slot_label)
+
+    # Railway runs this job every 5 minutes. Only the first successful tick for a new
+    # report slot does the expensive API work. If a run fails, the slot is NOT marked
+    # successful, so the next 5-minute tick retries automatically.
+    if not cfg.force_run and not cfg.dry_run and state.get_last_successful_slot() == slot_key:
+        log.info("Slot %s already updated successfully; nothing to do", slot_key)
+        return "SKIPPED_ALREADY_SUCCESSFUL"
+
     client.login()
     snapshot = collect_snapshot(cfg, client, now)
     text = build_message(snapshot, cfg)
@@ -106,7 +127,9 @@ def run_once(cfg: Config) -> str:
         print(text)
     else:
         bot.upsert_daily_report(snapshot.report_date.isoformat(), text)
+        state.set_last_successful_slot(slot_key)
         bot.clear_error()
+        log.info("RUN SUCCESS slot=%s total=%s amount=%s", slot_key, snapshot.totals.count, snapshot.totals.amount)
     return text
 
 
@@ -138,6 +161,12 @@ def main() -> int:
     cfg = Config.from_env()
     state = StateStore(cfg.state_path)
     bot = TelegramBot(cfg, state)
+
+    # Hard-stop a stuck cron execution before the next 5-minute watchdog tick.
+    # Railway skips new cron runs while a previous execution is still Active.
+    if cfg.job_timeout_seconds > 0 and hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(cfg.job_timeout_seconds)
 
     try:
         if args.get_chat_id:

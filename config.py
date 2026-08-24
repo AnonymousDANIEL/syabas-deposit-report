@@ -55,6 +55,8 @@ class Config:
     strict_final_daily_validation: bool
     show_validation_status: bool
     dry_run: bool
+    job_timeout_seconds: int
+    force_run: bool
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -88,4 +90,6 @@ class Config:
             strict_final_daily_validation=_bool("STRICT_FINAL_DAILY_VALIDATION", False),
             show_validation_status=_bool("SHOW_VALIDATION_STATUS", False),
             dry_run=_bool("DRY_RUN", False),
+            job_timeout_seconds=_int("JOB_TIMEOUT_SECONDS", 240),
+            force_run=_bool("FORCE_RUN", False),
         )

@@ -69,6 +69,17 @@ class StateStore:
                 messages.pop(key, None)
         self.save(data)
 
+
+    def get_last_successful_slot(self) -> str:
+        data = self.load()
+        return str(data.get("last_successful_slot", ""))
+
+    def set_last_successful_slot(self, slot_key: str) -> None:
+        data = self.load()
+        data["last_successful_slot"] = str(slot_key)
+        data["last_successful_slot_at"] = datetime.now(timezone.utc).isoformat()
+        self.save(data)
+
     def get_last_error_fingerprint(self) -> str:
         data = self.load()
         return str((data.get("last_error") or {}).get("fingerprint", ""))
