@@ -67,10 +67,13 @@ def target_money(value: Decimal) -> str:
 def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
     """Build the final Telegram layout as plain text.
 
-    Important: no HTML <pre> and no <code> tags are used. This guarantees
-    Telegram does not render the report as a copyable code block. The fixed
-    24-slot order is always shown: 0100..2300,0000. Future slots show zero
-    hourly values while the cumulative total remains at the latest real total.
+    No HTML <pre> / <code> is used, so Telegram will not show a Copy button.
+    All 24 slots are always visible in this order: 0100..2300,0000.
+
+    Closed slots show their real hourly values and real cumulative TOTAL.
+    Future slots show zero for BOTH the hourly values and the TOTAL column.
+    When that hour closes, the next refresh replaces the zero row with the
+    newly calculated real values.
     """
     lines = [
         "Syabas99 Deposit Report",
@@ -92,20 +95,26 @@ def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
 
     for label in labels:
         bucket = by_label.get(label)
+
         if bucket is None:
+            # Future/not-yet-closed hour: everything on this row stays zero.
             hour_count = 0
             hour_amount = Decimal("0.00")
+            display_total_count = 0
+            display_total_amount = Decimal("0.00")
         else:
             hour_count = bucket.totals.count
             hour_amount = bucket.totals.amount
             run_count += hour_count
             run_amount += hour_amount
+            display_total_count = run_count
+            display_total_amount = run_amount
 
         lines.append(
             f"{label} - "
             f"{hour_count:>4,} | "
             f"RM {hour_amount:>10,.2f} | "
-            f"TOTAL: {run_count:>4,} / RM {run_amount:,.2f}"
+            f"TOTAL: {display_total_count:>4,} / RM {display_total_amount:,.2f}"
         )
 
     if cfg.show_validation_status:
