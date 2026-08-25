@@ -65,15 +65,13 @@ def target_money(value: Decimal) -> str:
 
 
 def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
-    """Build the final compact Telegram layout.
+    """Build the final Telegram layout as plain text.
 
-    The whole report is rendered inside an HTML <pre> block so Telegram uses a
-    monospace font and all hourly columns stay vertically aligned. Future
-    (not-yet-closed) hours are never included because snapshot.buckets only
-    contains closed hourly windows.
+    Important: no HTML <pre> and no <code> tags are used. This guarantees
+    Telegram does not render the report as a copyable code block. The fixed
+    24-slot order is always shown: 0100..2300,0000. Future slots show zero
+    hourly values while the cumulative total remains at the latest real total.
     """
-    from html import escape
-
     lines = [
         "Syabas99 Deposit Report",
         "",
@@ -84,21 +82,30 @@ def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
         f"TOTAL COUNT : {snapshot.totals.count:,}",
         f"TOTAL AMOUNT : RM {money(snapshot.totals.amount)}",
         "",
-        "",
     ]
+
+    by_label = {bucket.label: bucket for bucket in snapshot.buckets}
+    labels = [f"{hour:02d}00" for hour in range(1, 24)] + ["0000"]
 
     run_count = 0
     run_amount = Decimal("0.00")
-    for bucket in snapshot.buckets:
-        run_count += bucket.totals.count
-        run_amount += bucket.totals.amount
-        # No table header and no repeated TOTAL label. Fixed widths keep every
-        # column aligned even when values grow from hundreds to thousands.
+
+    for label in labels:
+        bucket = by_label.get(label)
+        if bucket is None:
+            hour_count = 0
+            hour_amount = Decimal("0.00")
+        else:
+            hour_count = bucket.totals.count
+            hour_amount = bucket.totals.amount
+            run_count += hour_count
+            run_amount += hour_amount
+
         lines.append(
-            f"{bucket.label}  "
-            f"{bucket.totals.count:>5,}   "
-            f"RM {bucket.totals.amount:>10,.2f}   "
-            f"{run_count:>5,} / RM {run_amount:>10,.2f}"
+            f"{label} - "
+            f"{hour_count:>4,} | "
+            f"RM {hour_amount:>10,.2f} | "
+            f"TOTAL: {run_count:>4,} / RM {run_amount:,.2f}"
         )
 
     if cfg.show_validation_status:
@@ -108,7 +115,4 @@ def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
         elif snapshot.daily_verified is False:
             lines.append("Daily check : pending/mismatch")
 
-    # HTML parse mode is used by TelegramBot.upsert_daily_report(). Escaping
-    # first makes the generated message safe even if future labels change.
-    text = "\n".join(lines).rstrip()
-    return f"<pre>{escape(text)}</pre>"
+    return "\n".join(lines).rstrip()

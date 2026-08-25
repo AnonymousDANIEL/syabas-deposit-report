@@ -36,35 +36,41 @@ def test_new_day_starts_new_report_date():
     assert windows[0][2] == "0100"
 
 
-def test_final_aligned_layout():
+def test_exact_v7_layout_and_future_zero_rows():
     cfg = SimpleNamespace(
         target_count=8300,
         target_deposit=Decimal("100000"),
         show_validation_status=False,
     )
-    start = datetime(2026, 8, 24, 0, 0, tzinfo=TZ)
+    start = datetime(2026, 8, 25, 0, 0, tzinfo=TZ)
     buckets = [
-        HourBucket(start, start, "0100", Totals(count=197, amount=Decimal("6424.50"))),
-        HourBucket(start, start, "0200", Totals(count=198, amount=Decimal("7074.46"))),
+        HourBucket(start, start, "0100", Totals(count=200, amount=Decimal("8183.41"))),
+        HourBucket(start, start, "0200", Totals(count=245, amount=Decimal("10855.55"))),
     ]
     snap = ReportSnapshot(
-        report_date=date(2026, 8, 24),
+        report_date=date(2026, 8, 25),
         buckets=buckets,
-        totals=Totals(count=395, amount=Decimal("13498.96")),
+        totals=Totals(count=445, amount=Decimal("19038.96")),
         cumulative_verified=True,
         daily_verified=None,
     )
     msg = build_message(snap, cfg)
-    assert msg.startswith("<pre>") and msg.endswith("</pre>")
-    assert "HOUR" not in msg
-    assert "TOTAL:" not in msg
-    assert "0100    197   RM   6,424.50" in msg
-    assert "0200    198   RM   7,074.46" in msg
+
+    # No large Telegram code block => no Copy button.
+    assert "<pre>" not in msg and "</pre>" not in msg and "<code>" not in msg
+    # Exact requested separators/labels are back.
+    assert "0100 -  200 | RM   8,183.41 | TOTAL:  200 / RM 8,183.41" in msg
+    assert "0200 -  245 | RM  10,855.55 | TOTAL:  445 / RM 19,038.96" in msg
+    # All future slots are present as zero hourly rows, but cumulative freezes.
+    assert "0300 -    0 | RM       0.00 | TOTAL:  445 / RM 19,038.96" in msg
+    assert "2300 -    0 | RM       0.00 | TOTAL:  445 / RM 19,038.96" in msg
+    assert "0000 -    0 | RM       0.00 | TOTAL:  445 / RM 19,038.96" in msg
+    assert msg.count("TOTAL:") == 24
 
 
 if __name__ == "__main__":
     test_2105()
     test_midnight_finalizes_previous_day()
     test_new_day_starts_new_report_date()
-    test_final_aligned_layout()
-    print("logic + format tests OK")
+    test_exact_v7_layout_and_future_zero_rows()
+    print("logic + V7 format tests OK")

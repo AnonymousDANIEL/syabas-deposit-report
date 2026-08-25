@@ -186,11 +186,27 @@ def run_forever(cfg: Config) -> None:
     )
 
     # Claim the account immediately at startup.
+    startup_login_ok = False
     try:
         client.login(reason="takeover")
+        startup_login_ok = True
     except Exception as exc:
         log.exception("Initial force-login failed; daemon will keep retrying")
         _send_error_once(cfg, exc)
+
+    # Always re-render the currently active daily message once after a deploy/restart.
+    # This makes layout-only upgrades visible immediately even if this hour was
+    # already marked successful in persistent state.
+    if startup_login_ok:
+        try:
+            now = datetime.now(tz)
+            snapshot = collect_snapshot(cfg, client, now)
+            text = build_message(snapshot, cfg)
+            TelegramBot(cfg, state).upsert_daily_report(snapshot.report_date.isoformat(), text)
+            log.info("STARTUP FORMAT REFRESH OK report_date=%s", snapshot.report_date.isoformat())
+        except Exception as exc:
+            log.exception("Startup format refresh failed; hourly worker will retry normally")
+            _send_error_once(cfg, exc)
 
     next_guard_at = 0.0
     next_report_retry_at = 0.0

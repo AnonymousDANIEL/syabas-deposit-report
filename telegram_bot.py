@@ -73,7 +73,7 @@ class TelegramBot:
         ref = self.state.get_message(report_date)
         if ref:
             try:
-                self.edit_message(ref.chat_id, ref.message_id, text, parse_mode="HTML")
+                self.edit_message(ref.chat_id, ref.message_id, text)
                 self.state.set_message(report_date, ref.chat_id, ref.message_id)
                 log.info("Edited Telegram report message %s", ref.message_id)
                 return ref.message_id
@@ -83,7 +83,7 @@ class TelegramBot:
                     raise
                 log.warning("Saved Telegram message cannot be edited; sending a replacement")
 
-        message_id = self.send_message(self.cfg.telegram_chat_id, text, silent=True, parse_mode="HTML")
+        message_id = self.send_message(self.cfg.telegram_chat_id, text, silent=True)
         self.state.set_message(report_date, self.cfg.telegram_chat_id, message_id)
         log.info("Sent new Telegram report message %s", message_id)
         return message_id
