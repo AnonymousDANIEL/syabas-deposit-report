@@ -41,39 +41,39 @@ class TelegramBot:
             raise TelegramError(f"Telegram {method} failed: {desc}")
         return data
 
-    def send_message(self, chat_id: str, text: str, *, silent: bool = True) -> int:
+    def send_message(self, chat_id: str, text: str, *, silent: bool = True, parse_mode: str | None = None) -> int:
         if not str(chat_id).strip():
             raise TelegramError("TELEGRAM_CHAT_ID is empty")
-        data = self._call(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": text,
-                "disable_web_page_preview": True,
-                "disable_notification": silent,
-            },
-        )
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+            "disable_notification": silent,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        data = self._call("sendMessage", payload)
         result = data.get("result") or {}
         if "message_id" not in result:
             raise TelegramError("Telegram sendMessage response missing message_id")
         return int(result["message_id"])
 
-    def edit_message(self, chat_id: str, message_id: int, text: str) -> None:
-        self._call(
-            "editMessageText",
-            {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": text,
-                "disable_web_page_preview": True,
-            },
-        )
+    def edit_message(self, chat_id: str, message_id: int, text: str, *, parse_mode: str | None = None) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        self._call("editMessageText", payload)
 
     def upsert_daily_report(self, report_date: str, text: str) -> int:
         ref = self.state.get_message(report_date)
         if ref:
             try:
-                self.edit_message(ref.chat_id, ref.message_id, text)
+                self.edit_message(ref.chat_id, ref.message_id, text, parse_mode="HTML")
                 self.state.set_message(report_date, ref.chat_id, ref.message_id)
                 log.info("Edited Telegram report message %s", ref.message_id)
                 return ref.message_id
@@ -83,7 +83,7 @@ class TelegramBot:
                     raise
                 log.warning("Saved Telegram message cannot be edited; sending a replacement")
 
-        message_id = self.send_message(self.cfg.telegram_chat_id, text, silent=True)
+        message_id = self.send_message(self.cfg.telegram_chat_id, text, silent=True, parse_mode="HTML")
         self.state.set_message(report_date, self.cfg.telegram_chat_id, message_id)
         log.info("Sent new Telegram report message %s", message_id)
         return message_id

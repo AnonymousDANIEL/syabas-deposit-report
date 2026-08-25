@@ -1,52 +1,49 @@
-# Syabas99 Telegram Deposit Report — Stable V4
+# Syabas99 Telegram Deposit Report — Final V5
 
-This version is designed for the requirement: **if another login invalidates the bot session, reclaim the Syabas99 login immediately instead of waiting for the next cron run.**
+Final production layout + Stable V4 always-on/session-recovery behavior.
 
-## What changed from V3
+## Telegram behavior
 
-V3 used Railway Cron every 5 minutes. V4 is an **always-on Railway worker**.
+- Same report date: always **edit the same Telegram message**.
+- At `0000`, the previous date is finalized.
+- At the next `0100`, a **new Telegram message** is sent for the new report date.
+- Future hours are not shown.
+- A closed hour with zero deposits is still shown as zero.
+- Every update rebuilds all closed hours from fresh API data, so late COMPLETED deposits can correct earlier hours.
+- Validation failure never overwrites the last good Telegram report.
 
-- No 5-minute pre-login.
-- No need to wait for the next cron tick.
-- A lightweight authenticated health check runs every `SESSION_GUARD_SECONDS` (default 15 seconds).
-- If the token/session is rejected after another login, the worker immediately calls `/users/login`, gets a new `accessId` + `token`, and retries the same request.
-- The same immediate re-login logic is active during hourly report calculations, so a token rotation in the middle of a report does not have to wait for another scheduler cycle.
-- Each hourly report runs after a short grace period (`REPORT_GRACE_SECONDS`, default 60 seconds) so the previous hour can finish settling.
-- If the report validation/API fails, it retries every `REPORT_RETRY_SECONDS` (default 30 seconds) until the hour is successfully updated.
+## Final layout
 
-## Railway setup — IMPORTANT
+```text
+Syabas99 Deposit Report
 
-### 1. Remove the Cron Schedule
+Date : 24/08/2026
+Target : 8,300
+Target Deposit : 100,000
 
-V4 must stay running continuously. In Railway **Settings**, remove/disable the Cron Schedule such as:
+TOTAL COUNT : 3,529
+TOTAL AMOUNT : RM 120,054.91
 
-```cron
-*/5 * * * *
+
+0100    197   RM   6,424.50     197 / RM   6,424.50
+0200    198   RM   7,074.46     395 / RM  13,498.96
+...
+2300    207   RM   7,798.46   3,529 / RM 120,054.91
 ```
 
-Do not use a cron schedule for V4.
+Telegram HTML `<pre>` mode is used so the columns stay aligned in a monospace font. There is no HOUR/COUNT/AMOUNT/CUMULATIVE header and no repeated `TOTAL:` on hourly lines.
 
-### 2. Keep the service running
+## Railway
 
-The included Dockerfile starts:
+V5 remains an always-on worker. **Do not add a Cron Schedule.**
 
-```bash
-python main.py
-```
-
-`RUN_FOREVER=true` makes it remain active as a worker.
-
-### 3. Keep the `/data` Volume
-
-Mount Railway Volume at:
+Keep a Railway volume mounted at:
 
 ```text
 /data
 ```
 
-The state file stores the Telegram message ID and the last successful report slot. It does not need to store customer transaction rows.
-
-## Required Variables
+Required/recommended variables:
 
 ```text
 SITE_API_URL=https://jksyab99.u55y38.com/api/v1/index.php
@@ -57,11 +54,11 @@ SITE_TRACKING_CODE=
 
 TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
+TELEGRAM_ALERT_CHAT_ID=
 
 TARGET_COUNT=8300
 TARGET_DEPOSIT=100000
 REPORT_TIMEZONE=Asia/Kuala_Lumpur
-REPORT_LINE_STYLE=full
 STATE_PATH=/data/syabas_state.json
 
 RUN_FOREVER=true
@@ -70,81 +67,31 @@ SESSION_GUARD_SECONDS=15
 AUTH_RELOGIN_RETRIES=5
 REPORT_GRACE_SECONDS=60
 REPORT_RETRY_SECONDS=30
-
 PRELOGIN_ENABLED=false
+
+REQUEST_TIMEOUT_SECONDS=30
+REQUEST_RETRIES=3
+VALIDATION_RETRIES=3
+VALIDATION_RETRY_DELAY_SECONDS=4
+STRICT_FINAL_DAILY_VALIDATION=false
+SHOW_VALIDATION_STATUS=false
+DRY_RUN=false
+FORCE_RUN=false
 ```
 
-`TARGET_DEPOSIT` must be `100000`, not `100,000`.
+`REPORT_LINE_STYLE` may remain in Railway from an older version; V5 ignores it and always uses the final aligned layout.
 
-## Runtime behavior
+## Stability behavior
 
-Example around 22:00 Malaysia time:
+- Fresh login before every hourly report calculation.
+- Session guard checks the current authenticated session continuously.
+- If another login invalidates the worker token, it force-logins again and retries immediately.
+- Hourly update failure retries without waiting for the next hour.
+- The report date itself is the Telegram message key, which is why a new day automatically sends a new message instead of editing yesterday.
 
-```text
-21:59:45  session guard OK
-22:00:00  new 2200 slot exists
-22:01:00  report starts (default 60-second grace)
-           fresh force-login
-           fetch 0100..2200 data
-           validate hourly sum vs cumulative total
-           edit the same Telegram report message
-```
-
-If a person logs in at 22:12 and the site invalidates the worker's token:
-
-```text
-22:12:xx  health check is rejected
-           SESSION LOST/ROTATED
-           force /users/login immediately
-           new accessId/token
-           retry health check
-           SESSION RECOVERED
-```
-
-With `SESSION_GUARD_SECONDS=15`, detection is normally within about 15 seconds. Lower values create more API traffic; 15 seconds is the recommended default.
-
-## Important limitation
-
-The worker can only detect another login if that login actually invalidates/rotates the worker's authenticated token. There is no separate known "someone logged in" event endpoint. If the backend permits multiple simultaneous tokens, there is nothing to recover because the bot session remains valid.
-
-If a human keeps repeatedly logging in with the same account and the site allows only one session, the human and bot can repeatedly replace each other's session. The most reliable production setup is a dedicated Syabas99 account for the report worker if the backend supports one.
-
-## Useful logs
-
-Normal:
-
-```text
-DAEMON START ...
-SESSION GUARD OK
-HOURLY UPDATE DUE slot=2200 - running now
-SESSION TAKEOVER OK - Syabas99 force-login reclaimed the account
-RUN SUCCESS slot=2026-08-24:2200 ...
-```
-
-If another login invalidates the token:
-
-```text
-SESSION LOST/ROTATED ... Force-login starts immediately.
-SESSION TAKEOVER OK ...
-SESSION RECOVERED immediately ...
-```
-
-## One-time commands
-
-Run once and exit:
+## Local checks
 
 ```bash
-python main.py --once
-```
-
-Test Telegram:
-
-```bash
-python main.py --test-telegram
-```
-
-Get Telegram chat IDs:
-
-```bash
-python main.py --get-chat-id
+python -m py_compile *.py
+python test_logic.py
 ```

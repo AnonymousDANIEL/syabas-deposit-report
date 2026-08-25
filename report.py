@@ -65,6 +65,15 @@ def target_money(value: Decimal) -> str:
 
 
 def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
+    """Build the final compact Telegram layout.
+
+    The whole report is rendered inside an HTML <pre> block so Telegram uses a
+    monospace font and all hourly columns stay vertically aligned. Future
+    (not-yet-closed) hours are never included because snapshot.buckets only
+    contains closed hourly windows.
+    """
+    from html import escape
+
     lines = [
         "Syabas99 Deposit Report",
         "",
@@ -75,6 +84,7 @@ def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
         f"TOTAL COUNT : {snapshot.totals.count:,}",
         f"TOTAL AMOUNT : RM {money(snapshot.totals.amount)}",
         "",
+        "",
     ]
 
     run_count = 0
@@ -82,15 +92,14 @@ def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
     for bucket in snapshot.buckets:
         run_count += bucket.totals.count
         run_amount += bucket.totals.amount
-        if cfg.report_line_style == "simple":
-            lines.append(
-                f"{bucket.label} - {bucket.totals.count:,} | RM {money(bucket.totals.amount)}"
-            )
-        else:
-            lines.append(
-                f"{bucket.label} - {bucket.totals.count:,} | RM {money(bucket.totals.amount)} "
-                f"| TOTAL: {run_count:,} / RM {money(run_amount)}"
-            )
+        # No table header and no repeated TOTAL label. Fixed widths keep every
+        # column aligned even when values grow from hundreds to thousands.
+        lines.append(
+            f"{bucket.label}  "
+            f"{bucket.totals.count:>5,}   "
+            f"RM {bucket.totals.amount:>10,.2f}   "
+            f"{run_count:>5,} / RM {run_amount:>10,.2f}"
+        )
 
     if cfg.show_validation_status:
         lines += ["", "Validation : cumulative OK" if snapshot.cumulative_verified else "Validation : FAILED"]
@@ -99,4 +108,7 @@ def build_message(snapshot: ReportSnapshot, cfg: Config) -> str:
         elif snapshot.daily_verified is False:
             lines.append("Daily check : pending/mismatch")
 
-    return "\n".join(lines).rstrip()
+    # HTML parse mode is used by TelegramBot.upsert_daily_report(). Escaping
+    # first makes the generated message safe even if future labels change.
+    text = "\n".join(lines).rstrip()
+    return f"<pre>{escape(text)}</pre>"
