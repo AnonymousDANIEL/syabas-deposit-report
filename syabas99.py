@@ -137,13 +137,13 @@ class SyabasClient:
         else:
             log.info("Syabas99 login OK")
 
-    def _api_login(self, *, reason: str) -> None:
-        """Legacy/static trackingCode login path."""
+    def _api_login(self, *, reason: str, tracking_code: str | None = None) -> None:
+        """Direct /users/login using either a supplied fresh code or the static fallback."""
         form = {
             "username": self.cfg.site_username,
             "password": self.cfg.site_password,
             "passcode2fa": self.cfg.site_passcode_2fa,
-            "trackingCode": self.cfg.site_tracking_code,
+            "trackingCode": self.cfg.site_tracking_code if tracking_code is None else tracking_code,
             "captchaOutput": self.cfg.site_captcha_output,
             "module": "/users/login",
             "merchantId": self.cfg.site_merchant_id,
@@ -155,11 +155,17 @@ class SyabasClient:
 
     def _browser_login(self, *, reason: str) -> None:
         """
-        Open the real login page in headless Chromium and let the site generate
-        its current trackingCode. Capture the /users/login request + JSON response.
+        Get a fresh dynamic trackingCode from the real Syabas99 page, then perform
+        the normal /users/login API call directly.
 
-        This does not bypass CAPTCHA/2FA. If the site requires a human CAPTCHA or
-        an interactive 2FA step, login fails clearly instead of pretending success.
+        Important: we do NOT depend on locating/clicking the site's Login button.
+        The previous version timed out when the page UI changed. The trackingCode
+        itself is generated during the page's normal tracking bootstrap, so we
+        capture it from the outgoing /users/tracking request (or any request body
+        containing trackingCode), copy browser cookies, close Chromium, and then
+        call /users/login with that exact fresh code.
+
+        This does not bypass CAPTCHA/interactive 2FA.
         """
         try:
             from playwright.sync_api import sync_playwright
@@ -170,43 +176,31 @@ class SyabasClient:
 
         timeout_ms = self.cfg.browser_login_timeout_seconds * 1000
         captured: dict[str, Any] = {
-            "payload": None,
             "tracking_code": "",
-            "request_seen": False,
+            "tracking_module": "",
         }
 
-        def is_login_request(response: Any) -> bool:
+        def on_request(request: Any) -> None:
             try:
-                req = response.request
-                if req.method.upper() != "POST":
-                    return False
-                if "/api/v1/index.php" not in response.url:
-                    return False
-                raw = req.post_data or ""
-                parsed = parse_qs(raw, keep_blank_values=True)
-                module = (parsed.get("module") or [""])[0]
-                return module == "/users/login"
-            except Exception:
-                return False
+                raw = request.post_data or ""
+                if not raw:
+                    return
 
-        def on_response(response: Any) -> None:
-            if not is_login_request(response):
-                return
-            try:
-                captured["request_seen"] = True
-                raw = response.request.post_data or ""
                 parsed = parse_qs(raw, keep_blank_values=True)
-                captured["tracking_code"] = (
-                    (parsed.get("trackingCode") or [""])[0]
-                )
-                payload = response.json()
-                if isinstance(payload, dict):
-                    captured["payload"] = payload
-            except Exception as exc:
-                log.warning("Could not parse browser login response: %s", exc)
+                code = str((parsed.get("trackingCode") or [""])[0] or "")
+                module = str((parsed.get("module") or [""])[0] or "")
+
+                # Prefer the real /users/tracking bootstrap request, but accept any
+                # request carrying a non-empty trackingCode because frontend versions
+                # can rename/reorder their boot sequence.
+                if code and (module == "/users/tracking" or not captured["tracking_code"]):
+                    captured["tracking_code"] = code
+                    captured["tracking_module"] = module
+            except Exception:
+                return
 
         log.warning(
-            "AUTO TRACKING LOGIN - opening Syabas99 login page to obtain fresh trackingCode"
+            "AUTO TRACKING LOGIN - opening Syabas99 page to obtain fresh trackingCode"
         )
 
         with sync_playwright() as p:
@@ -219,7 +213,7 @@ class SyabasClient:
             )
             context = browser.new_context()
             page = context.new_page()
-            page.on("response", on_response)
+            page.on("request", on_request)
 
             try:
                 page.goto(
@@ -228,108 +222,53 @@ class SyabasClient:
                     timeout=timeout_ms,
                 )
 
-                # Give the page a moment to complete its IP/tracking initialization.
-                page.wait_for_timeout(1200)
-
-                username_selectors = [
-                    'input[name="username"]',
-                    'input#username',
-                    'input[name="user"]',
-                    'input[type="text"]',
-                ]
-                password_selectors = [
-                    'input[name="password"]',
-                    'input#password',
-                    'input[type="password"]',
-                ]
-
-                def first_visible(selectors: list[str]):
-                    for selector in selectors:
-                        loc = page.locator(selector)
-                        if loc.count() > 0:
-                            first = loc.first
-                            try:
-                                if first.is_visible():
-                                    return first
-                            except Exception:
-                                continue
-                    return None
-
-                user_input = first_visible(username_selectors)
-                pass_input = first_visible(password_selectors)
-                if user_input is None or pass_input is None:
-                    raise SyabasError(
-                        "Browser login page loaded, but username/password fields "
-                        "could not be detected"
-                    )
-
-                user_input.fill(self.cfg.site_username)
-                pass_input.fill(self.cfg.site_password)
-
-                if self.cfg.site_passcode_2fa:
-                    otp = first_visible(
-                        [
-                            'input[name="passcode2fa"]',
-                            'input[name="otp"]',
-                            'input[name="2fa"]',
-                        ]
-                    )
-                    if otp is not None:
-                        otp.fill(self.cfg.site_passcode_2fa)
-
-                if self.cfg.site_captcha_output:
-                    captcha = first_visible(
-                        [
-                            'input[name="captchaOutput"]',
-                            'input[name="captcha"]',
-                        ]
-                    )
-                    if captcha is not None:
-                        captcha.fill(self.cfg.site_captcha_output)
-
-                submit_selectors = [
-                    'button[type="submit"]',
-                    'input[type="submit"]',
-                    'button:has-text("Login")',
-                    'button:has-text("LOGIN")',
-                    'button:has-text("Sign In")',
-                    'button:has-text("SIGN IN")',
-                    '.btn-login',
-                    '#login',
-                ]
-                submit = first_visible(submit_selectors)
-                if submit is not None:
-                    submit.click()
-                else:
-                    pass_input.press("Enter")
-
                 deadline = time.monotonic() + self.cfg.browser_login_timeout_seconds
                 while time.monotonic() < deadline:
-                    if captured["payload"] is not None:
+                    if captured["tracking_code"]:
                         break
                     page.wait_for_timeout(200)
 
-                payload = captured["payload"]
-                if payload is None:
-                    if captured["request_seen"]:
-                        raise SyabasError(
-                            "Browser saw /users/login but could not read its JSON response"
+                tracking = str(captured["tracking_code"] or "")
+                if not tracking:
+                    # Some frontend builds may place it in browser storage before
+                    # sending it. Scan local/session storage as a safe fallback.
+                    try:
+                        storage_values = page.evaluate(
+                            """() => {
+                                const out = [];
+                                for (const store of [window.localStorage, window.sessionStorage]) {
+                                    for (let i = 0; i < store.length; i++) {
+                                        const k = store.key(i);
+                                        const v = store.getItem(k);
+                                        out.push([k || "", v || ""]);
+                                    }
+                                }
+                                return out;
+                            }"""
                         )
+                        for key, value in storage_values or []:
+                            if "tracking" in str(key).lower() and str(value).strip():
+                                tracking = str(value).strip()
+                                break
+                    except Exception:
+                        pass
+
+                if not tracking:
                     raise SyabasError(
-                        "Browser login timed out before /users/login was observed. "
-                        "The login page may have changed or may require CAPTCHA/2FA."
+                        "Could not capture a fresh trackingCode from the Syabas99 page. "
+                        "The tracking bootstrap may have changed or the page may be blocked "
+                        "from Railway."
                     )
 
-                tracking = str(captured["tracking_code"] or "")
                 self.last_tracking_code = tracking
                 log.info(
-                    "AUTO TRACKING CODE captured successfully (length=%s)",
+                    "AUTO TRACKING CODE captured successfully (length=%s module=%s)",
                     len(tracking),
+                    captured["tracking_module"] or "storage/fallback",
                 )
-                self._accept_login_payload(payload, reason=reason)
 
-                # Copy browser cookies into requests.Session in case the backend
-                # starts depending on them in addition to accessId/accessToken.
+                # Copy browser cookies into requests.Session in case the login/API now
+                # binds the generated tracking code to a browser cookie.
                 for cookie in context.cookies():
                     try:
                         self.session.cookies.set(
@@ -343,6 +282,9 @@ class SyabasClient:
             finally:
                 context.close()
                 browser.close()
+
+        # Use the exact fresh code immediately after it is generated.
+        self._api_login(reason=reason, tracking_code=tracking)
 
     def login(self, *, reason: str = "normal") -> None:
         if self.cfg.auto_tracking_code:
