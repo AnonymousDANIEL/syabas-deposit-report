@@ -37,6 +37,9 @@ class Config:
     site_tracking_code: str
     site_passcode_2fa: str
     site_captcha_output: str
+    site_login_url: str
+    auto_tracking_code: bool
+    browser_login_timeout_seconds: int
 
     telegram_bot_token: str
     telegram_chat_id: str
@@ -83,6 +86,9 @@ class Config:
             site_tracking_code=_env("SITE_TRACKING_CODE", ""),
             site_passcode_2fa=_env("SITE_PASSCODE_2FA", ""),
             site_captcha_output=_env("SITE_CAPTCHA_OUTPUT", ""),
+            site_login_url=_env("SITE_LOGIN_URL", "https://jksyab99.u55y38.com/"),
+            auto_tracking_code=_bool("AUTO_TRACKING_CODE", True),
+            browser_login_timeout_seconds=max(10, _int("BROWSER_LOGIN_TIMEOUT_SECONDS", 30)),
             telegram_bot_token=_env("TELEGRAM_BOT_TOKEN", required=True),
             telegram_chat_id=_env("TELEGRAM_CHAT_ID", ""),
             telegram_alert_chat_id=_env("TELEGRAM_ALERT_CHAT_ID", ""),
