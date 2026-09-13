@@ -1,16 +1,59 @@
-# Syabas99 Telegram Deposit Report — Final V8
+# Syabas99 Telegram Deposit Report — Final Auto TrackingCode
 
-V8 fixes the Telegram display issue:
+This is the current stable Railway/GitHub version.
 
-- Report is sent as **plain text** — no `<pre>` and no `<code>`.
-- Therefore Telegram does **not** show the large **Copy** button.
-- Exact hourly row format: `0100 -    0 | RM       0.00 | TOTAL:    0 / RM 0.00`.
-- Always shows all 24 labels: `0100` through `2300`, then `0000`.
-- Closed hours use real values; future hours show `0 / RM 0.00`.
-- Cumulative `TOTAL:` stays at the latest verified real cumulative total.
-- The same day edits the same Telegram message.
+## Login stability
+
+The Syabas99 login trackingCode changes on each login. This version no longer
+depends on a fixed SITE_TRACKING_CODE.
+
+With:
+
+```
+AUTO_TRACKING_CODE=true
+```
+
+the worker launches headless Chromium only when login/re-login is needed:
+
+1. Opens the real Syabas99 login page.
+2. Lets the site generate its latest trackingCode normally.
+3. Fills SITE_USERNAME / SITE_PASSWORD.
+4. Captures the real /users/login request and successful JSON response.
+5. Stores data.id as accessId and data.token as accessToken in memory.
+6. Closes Chromium.
+7. All deposit/report requests continue through the fast direct API.
+
+If another human login invalidates the bot session, SESSION GUARD detects it
+and immediately performs the same fresh browser login again. Railway does not
+need to be restarted.
+
+This does not bypass CAPTCHA or interactive 2FA. If Syabas99 starts requiring
+a human CAPTCHA/2FA challenge, the worker fails clearly and alerts instead of
+pretending the login succeeded.
+
+## Telegram behavior
+
+- Same report date edits the same Telegram message.
 - A new report date creates a new Telegram message.
-- On every Railway deploy/restart, V8 immediately re-renders the current Telegram message once, so formatting changes show immediately instead of waiting for the next hour.
-- Always-on session guard/relogin behavior from V4+ is retained.
+- Shows all 24 labels: 0100..2300, then 0000.
+- Future/unclosed rows show:
+  `0 | RM 0.00 | TOTAL: 0 / RM 0.00`
+- When an hour closes, that row changes to the verified real amount/count and
+  real cumulative TOTAL.
+- Plain-text message: no Telegram Copy code-block button.
 
-Railway should continue running as an always-on service (no cron).
+## Railway
+
+Run as an always-on service, not Cron.
+
+Required new variables:
+
+```
+SITE_LOGIN_URL=https://jksyab99.u55y38.com/
+AUTO_TRACKING_CODE=true
+BROWSER_LOGIN_TIMEOUT_SECONDS=30
+```
+
+Keep SITE_TRACKING_CODE empty in auto mode.
+
+The Docker image installs Playwright Chromium automatically.
