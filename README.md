@@ -57,3 +57,14 @@ BROWSER_LOGIN_TIMEOUT_SECONDS=30
 Keep SITE_TRACKING_CODE empty in auto mode.
 
 The Docker image installs Playwright Chromium automatically.
+
+
+## Exact hourly timing
+
+Set:
+
+```
+REPORT_GRACE_SECONDS=0
+```
+
+The worker starts the new hourly calculation immediately after the top of the hour. There is no intentional +1 minute delay. If the upstream API has not finished closing the hour yet, the existing retry loop keeps retrying until the validated report succeeds.
