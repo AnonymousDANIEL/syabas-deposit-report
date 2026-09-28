@@ -250,9 +250,11 @@ class SyabasClient:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
+                channel="chromium",
                 args=[
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
+                    "--disable-gpu",
                 ],
             )
             context = browser.new_context()
