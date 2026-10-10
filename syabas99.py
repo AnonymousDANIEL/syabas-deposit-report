@@ -111,6 +111,23 @@ class SyabasClient:
             return str(data.get("message"))
         return str(payload.get("message") or payload.get("error") or payload)
 
+    @staticmethod
+    def _is_auth_failure(payload: dict[str, Any]) -> bool:
+        """Return True only for responses that really indicate an expired/invalid login."""
+        message = SyabasClient._message(payload).lower()
+        auth_terms = (
+            "invalid login",
+            "invalid token",
+            "token expired",
+            "session expired",
+            "unauthorized",
+            "not authorized",
+            "access denied",
+            "invalid access",
+            "login required",
+        )
+        return any(term in message for term in auth_terms)
+
     def _accept_login_payload(self, payload: dict[str, Any], *, reason: str) -> None:
         if not self._is_success(payload):
             raise SyabasError(
@@ -542,6 +559,11 @@ class SyabasClient:
             return payload
 
         first_message = self._message(payload)
+        if not self._is_auth_failure(payload):
+            raise SyabasError(
+                f"Syabas99 API rejected request without an authentication error: {first_message}"
+            )
+
         log.warning(
             "SESSION LOST/ROTATED - authenticated request rejected: %s. "
             "Force-login starts immediately.",
