@@ -98,9 +98,9 @@ def collect_snapshot(cfg: Config, client: SyabasClient, now: datetime) -> Report
                 cfg.validation_retry_delay_seconds,
             )
             time.sleep(cfg.validation_retry_delay_seconds)
-            # Fresh login between complete validation attempts. If another person has
-            # logged in, this immediately reclaims the account before retrying.
-            client.force_login()
+            # Do not force a browser login for a data-validation mismatch.
+            # Authentication recovery already happens inside _authenticated_post()
+            # if Syabas99 actually rejects the current access token.
 
     raise last_error or ValidationError("Unable to validate report")
 
@@ -122,9 +122,13 @@ def run_once(cfg: Config, client: SyabasClient | None = None) -> str:
         log.info("Slot %s already updated successfully; nothing to do", slot_key)
         return "SKIPPED_ALREADY_SUCCESSFUL"
 
-    # Fresh login before every report cycle. If a human login was the latest session,
-    # the report worker immediately takes the session back here.
-    client.login(reason="takeover")
+    # Reuse the daemon's already-authenticated session whenever possible.
+    # The session guard continuously verifies it, and _authenticated_post()
+    # automatically re-logins only if Syabas99 actually rejects the token.
+    # This avoids opening Chromium at every top-of-hour report, which used to
+    # make a healthy report fail whenever the login page was temporarily slow.
+    if not client.access_id or not client.access_token:
+        client.login(reason="takeover")
     snapshot = collect_snapshot(cfg, client, now)
     text = build_message(snapshot, cfg)
 
